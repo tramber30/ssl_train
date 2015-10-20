@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall
+CFLAGS = -Wall -g
 SRC_FILES = http.c
 
 http_client: $(SRC_FILES)
