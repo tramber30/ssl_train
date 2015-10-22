@@ -19,6 +19,46 @@
 #else
 #define LOG(str, ...)
 #endif
+
+typedef struct {
+	int	port;
+	char	host[MAX_BUFFER_SIZE];
+	char	user[MAX_BUFFER_SIZE];
+	char	password[MAX_BUFFER_SIZE];
+} proxy_t;
+	
+static char b64 [] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/*
+ * Base64 encoding
+ */
+void base64_encode(const unsigned char *input, int len, unsigned char *output)
+{
+	do
+	{
+		*output++ = b64[(input[0] & 0xFC) >> 2];
+
+		if (len == 1) {
+			*output++ = b64[((input[0] & 0x03) << 4)];
+			*output++ = '=';
+			*output++ = '=';
+			break;
+		}
+
+		*output++ = b64[((input[0] & 0x03) << 4) | ((input[1] & 0x0F) >> 4)];
+		if (len == 2) {
+			*output++ = b64[((input[1] & 0x0F) << 2)];
+			*output++ = '=';
+			break;
+		}
+
+		*output++ = b64[((input[1] & 0x0F) << 2) | ((input[2] & 0xC0) >> 6)];
+		input += 3;
+	} while (len -= 3);
+
+	*output ='\0';
+}
+
 /*
  * Accept a well formed URL and return pointers on the host part
  * and the path part. It modify the uri and return 0 on success, 
@@ -43,7 +83,6 @@ int parse_url(char *uri, char **host, char **path)
 		*path = pos + 1;
 	}
 
-	LOG("out");
 	return 0;
 }
 
@@ -74,16 +113,14 @@ int display_result(int connection)
  * with errno set. Caller must then retieve the response
  */
 int http_get(int connection, const char *path, const char *host,
-		const char *proxy_host,
-		const char *proxy_user,
-		const char *proxy_password)
+		proxy_t proxy)
 {
 	int result;
 	static char get_command[MAX_GET_COMMAND];
 
 	LOG("start");
 	
-	if (proxy_host)
+	if (proxy.port)
 		sprintf(get_command, "GET http://%s/%s HTTP/1.1\r\n", host, path);
 	else
 		sprintf(get_command, "GET /%s HTTP/1.1\r\n", path);
@@ -105,7 +142,7 @@ int http_get(int connection, const char *path, const char *host,
 	return 0;
 }
 
-int proxy_parser(char *proxy_string, int *proxy_port, char *proxy_host, char *proxy_user, char *proxy_password)
+int proxy_parser(char *proxy_string, proxy_t *proxy)
 {
 	char *login_sep, *colon_sep, *trailer_sep;
 
@@ -124,10 +161,10 @@ int proxy_parser(char *proxy_string, int *proxy_port, char *proxy_host, char *pr
 			return -1;
 		}
 		*colon_sep = '\0';
-		strcpy(proxy_host, proxy_string);
+//		strcpy(proxy.host, proxy_string);
 		*login_sep = '\0';
-		strcpy(proxy_user, proxy_string);
-		strcpy(proxy_password, colon_sep + 1);
+		strcpy(proxy->user, proxy_string);
+		strcpy(proxy->password, colon_sep + 1);
 		strcpy(proxy_string, login_sep + 1);
 	}
 	
@@ -140,16 +177,16 @@ int proxy_parser(char *proxy_string, int *proxy_port, char *proxy_host, char *pr
 	if (colon_sep) {
 		/* Non standard proxy port */
 		*colon_sep = '\0';
-		strcpy(proxy_host, proxy_string);
-		*proxy_port = atoi(colon_sep + 1);
+		strcpy(proxy->host, proxy_string);
+		proxy->port = atoi(colon_sep + 1);
 		/* Authorized range of port */
-		if (*proxy_port < 1 || *proxy_port > 65535) {
-			fprintf(stderr, "Wrong port number (%d)", *proxy_port);
+		if (proxy->port < 1 || proxy->port > 65535) {
+			fprintf(stderr, "Wrong port number (%d)", proxy->port);
 			return -2;
 		}
 	} else {
-		*proxy_port = HTTP_PORT;
-		strcpy(proxy_host, proxy_string);
+		proxy->port = HTTP_PORT;
+		strcpy(proxy->host, proxy_string);
 	}
 	return 0;
 }
@@ -169,14 +206,11 @@ void usage(char *cmd_name)
 int main(int argc, char *argv[])
 {
 	int client_connection, result;
-	int proxy_port, ind, it;
-	char proxy_host[MAX_BUFFER_SIZE] = {};
-	char proxy_user[MAX_BUFFER_SIZE] = {};
-	char proxy_password[MAX_BUFFER_SIZE] = {};
+	int ind, it;
 	char *host, *path;
 	struct hostent *host_name;
 	struct sockaddr_in host_address;
-	
+	proxy_t proxy;
 	extern char *optarg;
 	extern int optind, optopt;
 
@@ -187,12 +221,14 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
+	memset(&proxy, 0x00, sizeof(proxy_t));
+
 	while ((ind = getopt(argc, argv, "p:")) != -1) {
 		switch(ind) {
 		case 'p':
-			proxy_parser(optarg, &proxy_port, proxy_host, proxy_user, proxy_password);
+			proxy_parser(optarg, &proxy);
 			LOG("Use proxy settings\n");
-			LOG("proxy_port: %d, proxy_host: (%s), proxy_user: (%s), proxy_password: (%s)", proxy_port, proxy_host, proxy_user, proxy_password);
+			LOG("proxy_port: %d, proxy_host: (%s), proxy_user: (%s), proxy_password: (%s)", proxy.port, proxy.host, proxy.user, proxy.password);
 			break;
 		case ':':
 			LOG("-%c without filename\n", optopt);
@@ -215,8 +251,6 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
-	printf("Connection to host (%s)\n", host);
-
 	/* Open socket connection on http_port with the destination host */
 	client_connection = socket(PF_INET, SOCK_STREAM, 0);
 	if (!client_connection) {
@@ -224,10 +258,16 @@ int main(int argc, char *argv[])
 		return -2;
 	}
 
-	LOG("after socket creation");
+	if (proxy.port) {
+		/* Resolve proxy host name */
+		LOG("Connecting to proxy: (%s)", proxy.host);
+		host_name = gethostbyname(proxy.host);
+	} else {
+		/* Resolve host name */
+		LOG("Connecting to host: (%s)", host);
+		host_name = gethostbyname(host);
+	}
 
-	/* Resolve host name */
-	host_name = gethostbyname(host);
 	if (!host_name) {
 		perror("Error in name resolution");
 		return -3;
@@ -249,7 +289,7 @@ int main(int argc, char *argv[])
 
 	printf("Retrieve document: (%s)\n", path);
 
-	http_get(client_connection, path, host, proxy_host, proxy_user, proxy_password);
+	http_get(client_connection, path, host, proxy);
 
 	LOG("document retrieved");
 	display_result(client_connection);
@@ -264,31 +304,4 @@ int main(int argc, char *argv[])
 
 	return 0;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
