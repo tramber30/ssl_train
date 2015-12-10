@@ -59,6 +59,54 @@ void base64_encode(const unsigned char *input, int len, unsigned char *output)
 	*output ='\0';
 }
 
+static int unbase64[] =
+{
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 62, -1, -1, -1, 63, 52,
+	53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, 0, -1, -1, -1,
+	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+	16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1, -1, -1, -1,
+	26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41,
+	42, 43, 44, 45, 46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1, -1
+};
+
+int base64_decode(const unsigned char *input, int len, unsigned char *output)
+{
+	size_t out_len = 0;
+	int i;
+
+	if (len & 0x03) {
+		fprintf(stderr, "Error string is mal formed, not even a multiple of 4, len = %d\n", len);		return -1;
+	}
+
+	do {
+		for (i = 0; i <= 3; i++) {
+			// Check for illegal base64 characters
+			if (input[i] > 128 || unbase64[input[i]] == -1) {
+				fprintf(stderr, "Invalid base64 character: %c\n", input[i]);
+				return -1;
+			}
+		}
+		*output++ = unbase64[input[0]] << 2 | (unbase64[input[1]] & 0x30) >> 4;
+		out_len++;
+		
+		if (input[2] != '=') {
+			*output++ = (unbase64[input[1]] & 0x0F) << 4 | (unbase64[input[2]] & 0x3C) >> 2;
+			out_len++;
+		}
+
+		if (input[3] != '=') {
+			*output++ = (unbase64[input[2]] & 0x03) << 6 | unbase64[input[3]];
+			out_len++;
+		}
+
+		input += 4;
+	} while (len -= 4);
+
+	return out_len;
+}
+
 /*
  * Accept a well formed URL and return pointers on the host part
  * and the path part. It modify the uri and return 0 on success, 
@@ -115,7 +163,7 @@ int display_result(int connection)
 int http_get(int connection, const char *path, const char *host,
 		proxy_t proxy)
 {
-	int result;
+	int result = 0;
 	static char get_command[MAX_GET_COMMAND];
 
 	LOG("start");
@@ -127,19 +175,34 @@ int http_get(int connection, const char *path, const char *host,
 
 	result = send(connection, get_command, strlen(get_command), 0);
 	if (result < 0)
-		return -1;
+		return result;
 
 	sprintf(get_command, "Host: %s\r\n", host);
 	result = send(connection, get_command, strlen(get_command), 0);
 	if (result < 0)
-		return -2;
+		return result;
+
+	if (proxy.user) {
+		size_t cred_len = strlen(proxy.user) + strlen(proxy.password) + 1;
+		char *cred = malloc(cred_len);
+		char *encoded_cred = malloc(((cred_len*4)/3)+1);
+
+		sprintf(cred, "%s:%s", proxy.user, proxy.password);
+		base64_encode((unsigned char *)cred, cred_len, (unsigned char *)encoded_cred);
+		sprintf(get_command, "Proxy-Authorization: BASIC %s/r/n", encoded_cred);
+
+		result = send(connection, get_command, strlen(get_command), 0);
+		free(encoded_cred);
+		free(cred);
+
+		if (result < 0)
+			return result;
+	}		
+							
 
 	sprintf(get_command, "Connection: close\r\n\r\n");
 	result = send(connection, get_command, strlen(get_command), 0);
-	if (result < 0)
-		return -3;
-
-	return 0;
+	return result;
 }
 
 int proxy_parser(char *proxy_string, proxy_t *proxy)

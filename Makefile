@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -g
-SRC_FILES = http.c
+SRC_FILES = http_client.c
 
 http_client: $(SRC_FILES)
 	$(CC) -o $@ $(CFLAGS) $^ 
